@@ -11,10 +11,10 @@
 ```bash
 node build.mjs            # 源码 → dist/index.html（单文件，可双击打开）
 node serve.mjs            # http://127.0.0.1:4173
-node tests/all.mjs        # 29 个测试
+node tests/all.mjs        # 31 个测试
 ```
 
-`dist/index.html` 把 JS、CSS、字体（base64）全部内联进一个 HTML，**289 KB**，
+`dist/index.html` 把 JS、CSS、字体（base64）、单词发音（base64）全部内联进一个 HTML，**381 KB**，
 没有任何外部请求，可以直接扔到任何静态托管（GitHub Pages / Vercel / OSS / 微信里直接发文件）。
 
 ## 玩法
@@ -34,47 +34,60 @@ node tests/all.mjs        # 29 个测试
 
 ## 声音
 
-**一个音频文件都没有**，全部实时合成。换来的是 0 KB 体积、0 授权风险、离线可用。
+**音效一个音频文件都没有**，全部 WebAudio 实时合成；**发音则自带 32 段 mp3**（见下）。
 
 - 音效走 WebAudio：`tap` 点击、`whoosh` 进关、`hit` 命中、`correct` 上行琶音、
   `coin` 金币、`wrong` 下行滑音、`star` 结算逐颗、`fanfare` 三星。
   每个音都带 ADSR 包络（`exponentialRampToValueAtTime` 从 0.0001 起），不会爆音。
 - 答对是**三层叠加**：低鼓 + 四音琶音 + 130ms 后的金币，单层听起来"飘"。
-- 发音走系统 TTS：`rate 0.78`、`pitch 1.12`（放慢、略提高，6–7 岁听得清），
-  优先挑 `Samantha / Zira / Google US English` 这类英文女声。
 - 静音开关在 HUD 右上角，**写进存档**（`profile.muted`），下次打开还记得。
   静音时音效连节点都不创建，`speak()` 仍会调用 `onend`，不会有流程卡在等朗读结束。
-- 每次 `speak()` 带 **1200ms 看门狗**：`onstart` 没来就认为这台设备念不出声。
 
-⚠️ iOS Safari 要求音频必须在用户手势里启动，所以 `initAudio()` 挂在
-`pointerdown` 和「开始冒险」按钮上；不要改成页面加载时就 `new AudioContext()`。
+### 单词发音：自带音频，不靠系统 TTS
+
+**这是这个项目最重要的一个决定。** 早期版本用 Web Speech API 念单词，
+结果在小米手机、微信内置浏览器里完全没声音——因为那些内核根本**没有英文语音引擎**，
+`speechSynthesis` 要么不存在，要么存在但永远不响，且不报错。
+
+现在改成：32 个单词各带一段 mp3，**构建时以 base64 内联进单文件**，运行时用 WebAudio
+`decodeAudioData` + `BufferSource` 播放。任何平台的浏览器都能播，包括微信。
+
+- 素材来源：Windows SAPI（`Microsoft Zira Desktop`）合成 wav → ffmpeg 裁掉首尾静音、
+  转 22.05kHz 单声道 24kbps mp3。共 64.5 KB，base64 后 87 KB。
+- 生成脚本：`.tmp/genvoices.ps1`（SAPI 合成 + ffmpeg 转码 + 拼成 `src/core/voices.js`）。
+  换词表后重跑一次即可，产物是纯数据模块，构建时自动内联。
+- 播放顺序：**内置 mp3 → 系统 TTS 兜底 → 都没有就 `onend`**。
+  解码超过 1.2 秒没回来也会走兜底，绝不让等待朗读的流程卡死。
+- 开局会 `preloadWords()` 把这一局的词先解码好，第一次点喇叭没有延迟。
+
+`VOICES` 覆盖检查：`tests/audio.test.js` 断言 mp3 优先、TTS 只作兜底；
+`node .shots/audiocheck.html`（headless Edge 打开）会把样本词真解一遍并报峰值音量，
+确认不是"字节能对上但解出来是静音"。
 
 ## 微信内置浏览器（重要）
 
-微信里打开这份游戏，**声音是最容易出问题的一环**，实测两种病：
+微信里打开这份游戏，声音曾经是最容易出问题的一环，实测两种病：
 
 - 安卓 X5 内核：`window.speechSynthesis` 直接不存在，`speak()` 静默失败。
 - iOS WKWebView：对象存在、`speak()` 也不报错，但**第一次朗读不在用户手势里就永久静音**
   （页面加载后 `setTimeout` 触发的朗读不算手势）。
 
-所以做了三件事，改这块前请连着看：
+**现在自带 mp3 之后，这两条都不再影响发音**。保留的三层防御仍然有用，改这块前请连着看：
 
 1. **手势解锁**：`unlockAudio()` 在 `pointerdown` / 「开始冒险」被点时执行——`AudioContext.resume()`
-   播一帧静音、再念一句空 utterance（`volume 0`）把语音队列点燃。之后的对局内朗读才有效。
-2. **1200ms 看门狗 + 整关降级**：`speak()` 的 `onstart` 没来就判定这设备念不出声，
-   本关听音题即时换成看图选词（`speakSafeDef()` 把 `listen-pick` 映射成 `pick-word`，
-   对局中途失效也能就地换题），并弹一条 toast 告诉家长。宁可换题型，也不要让孩子
-   对着一张点不响的喇叭干瞪眼。
+   播一帧静音、再念一句空 utterance（`volume 0`）把语音队列点燃。WebAudio 与 TTS 都要这一步。
+2. **看门狗 + 整关降级**（只在"既没有内置音频、TTS 又不响"时才会触发）：
+   `speak()` 的 `onstart` 没来就判定这设备念不出声，本关听音题即时换成看图选词
+   （`speakSafeDef()` 把 `listen-pick` 映射成 `pick-word`，对局中途失效也能就地换题），
+   并弹一条 toast 告诉家长。
 3. **大喇叭本身可重播**：`.speaker` 绑了 `onclick`——家长把手机给孩子之前先点一下，
    这一下同时也是手势解锁。
 
-`speechUnavailable()` 是唯一判据：`!hasVoice() || speechBroken`。
-`speechBroken` 只在**手势解锁之后**才可能置真（没解锁时不响是正常的，不能记成设备坏）。
+`speechUnavailable()` 是唯一判据：**有内置音频就直接返回 false**；
+否则才看 `!hasVoice() || speechBroken`。`speechBroken` 只在手势解锁之后才可能置真。
 
-`shots/14-nospeech.png` 就是降级后的样子：听音题变成「看图 + 4 个单词」，没有大喇叭。
-
-第一次朗读的看门狗放宽到 **2.5 秒**（后面每次 1.2 秒）：安卓冷启动 TTS 引擎要 1.5–2 秒很常见，
-用 1.2 秒会把"其实能念"的设备误判成哑巴，然后整关听音题被降级。
+`shots/14-nospeech.png` 是把 `speechSynthesis` 整个删掉之后的样子：
+**听音题照常出现**（大喇叭在、4 个图片选项），不再降级，也没有提示条。
 
 ## 深色模式（必读）
 
@@ -112,7 +125,7 @@ harness.html?to=battle-word&seed=progress
 ## 测试
 
 ```bash
-node tests/all.mjs            # 29 个：数据 8 + 存档 13 + 微信降级 2 + 全流程/商店/静音 3 + 音频 3
+node tests/all.mjs            # 31 个：数据 8 + 存档 13 + 微信/发音降级 3 + 全流程/商店/静音 3 + 音频 4
 node tests/verify-build.mjs   # 校验单文件构建产物完整性
 ```
 
