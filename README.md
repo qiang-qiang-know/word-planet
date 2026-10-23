@@ -73,6 +73,42 @@ node tests/all.mjs        # 29 个测试
 
 `shots/14-nospeech.png` 就是降级后的样子：听音题变成「看图 + 4 个单词」，没有大喇叭。
 
+第一次朗读的看门狗放宽到 **2.5 秒**（后面每次 1.2 秒）：安卓冷启动 TTS 引擎要 1.5–2 秒很常见，
+用 1.2 秒会把"其实能念"的设备误判成哑巴，然后整关听音题被降级。
+
+## 深色模式（必读）
+
+**症状**：在小米手机自带浏览器 / 开了「深色模式」的浏览器里打开，整屏变成黑底、奶白卡片全黑、
+深色文字变白——看起来像样式全丢了。
+
+**原因**：这些浏览器会对**没有声明 `color-scheme`** 的页面做"强制反色"（force dark）：
+把浅色背景压暗、深色文字提亮。本作本来就是深色背景 + 奶白卡片，正好被算法当成"浅色页面"翻掉。
+
+**修复**：同时声明
+
+```html
+<meta name="color-scheme" content="dark" />
+```
+
+```css
+:root { color-scheme: dark; }
+```
+
+声明之后浏览器认为"这页已经是深色了"，不再自动反色。`tests/verify-build.mjs` 会校验这两处都在，
+删掉会直接构建失败。
+
+**怎么自己复现/验收**：
+
+```bash
+# 复现坏样子（强制反色 + 强行关掉声明）
+harness.html?to=battle-word&seed=progress&light=1
+# 修复后的样子（同样的强制反色，但声明生效）
+harness.html?to=battle-word&seed=progress
+```
+
+两屏都加 `--force-dark-mode --enable-features=WebContentsForceDark` 用 Edge headless 截。
+对照图：`shots/17-dark-broken.png`（坏）与 `shots/18-dark-fixed.png`（好）。
+
 ## 测试
 
 ```bash

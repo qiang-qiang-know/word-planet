@@ -4,6 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
 <meta name="theme-color" content="#1B1630" />
+<meta name="color-scheme" content="dark" />
+<meta name="supported-color-schemes" content="dark" />
 <meta name="description" content="单词星球 Word Planet —— 一年级英语闯关游戏。说对一个词，灰白的世界就亮起一块颜色。" />
 <title>单词星球 Word Planet</title>
 <style>
@@ -22,6 +24,11 @@
 }
 
 :root {
+  /* 声明本页已经是深色主题。小米/微信等自带浏览器的「深色模式」会对没有声明
+     color-scheme 的页面做强制反色（force dark）：奶白卡片变黑、深色字变白，
+     整屏看起来像坏了。声明 dark 后浏览器不再自动反色。见 README「深色模式」。 */
+  color-scheme: dark;
+
   --void: #1b1630;
   --void-deep: #100c1e;
   --dusk: #2e2647;
@@ -2047,6 +2054,7 @@ function hasVoice() {
 // 只能靠"发一条出去看它有没有 onstart"来判定，判断一次就记住。
 let speechBroken = false;
 let active = null;
+let speakCalls = 0;
 
 function speechUnavailable() {
   return !hasVoice() || speechBroken;
@@ -2059,11 +2067,15 @@ function speechUnavailable() {
  * onerror，表现就是"点了没反应"。1.2 秒没有动静就判定这台机器念不出来，
  * 并且**必须**补调 onend，否则等朗读结束的流程会永远卡住。
  */
-function speak(text, { rate = 0.78, pitch = 1.12, onend, timeout = 1200 } = {}) {
+function speak(text, { rate = 0.78, pitch = 1.12, onend, timeout } = {}) {
   if (!hasVoice() || muted) {
     onend?.();
     return;
   }
+  // 第一次朗读给宽一点：安卓机器冷启动 TTS 引擎要 1.5–2 秒很常见，
+  // 用 1.2 秒会把"其实能念"的设备误判成哑巴，然后整关听音题被降级。
+  speakCalls += 1;
+  const ms = timeout ?? (speakCalls === 1 ? 2500 : 1200);
   const synth = window.speechSynthesis;
   if (active) active.finish();
   try {
@@ -2094,7 +2106,7 @@ function speak(text, { rate = 0.78, pitch = 1.12, onend, timeout = 1200 } = {}) 
   timer = setTimeout(() => {
     markBroken();
     finish();
-  }, timeout);
+  }, ms);
 
   u.onstart = () => {
     if (timer) clearTimeout(timer);
