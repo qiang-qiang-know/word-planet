@@ -1240,6 +1240,38 @@ body::before {
   }
 }
 
+/* 给家长的一句话：设备念不出声时用，孩子还不识字，所以位置偏上、字号小 */
+.toast {
+  position: absolute;
+  left: 50%;
+  top: 16%;
+  max-width: 82%;
+  padding: 0.7em 1em;
+  border-radius: 0.9em;
+  background: rgba(20, 16, 31, 0.94);
+  border: 1px solid rgba(255, 246, 233, 0.22);
+  color: rgba(255, 246, 233, 0.9);
+  font-size: 0.72em;
+  line-height: 1.5;
+  text-align: center;
+  transform: translateX(-50%);
+  box-shadow: 0 0.6em 1.4em rgba(0, 0, 0, 0.5);
+  animation: toastIn 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+
+.toast--out {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-0.6em);
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-0.5em);
+  }
+}
+
 /* ============================================================
    结算
    ============================================================ */
@@ -1860,6 +1892,42 @@ function initAudio() {
   if (ctx.state === 'suspended') ctx.resume().catch(() => {});
 }
 
+let audioPrimed = false;
+let speechPrimed = false;
+
+/**
+ * 必须在真实手势（pointerdown/click）的调用栈里同步调用。
+ *
+ * iOS Safari、微信内置浏览器（WKWebView）、部分安卓 X5 内核有一条坑：
+ * AudioContext 就算在构造函数里创建了也会是 suspended，必须 resume 之后
+ * 再播一个静音 buffer 才算真正解锁；语音同理，第一次 speak() 不在手势里
+ * 就永远不响，而且**不报错**。所以这两件事都要在这里做一遍。
+ */
+function unlockAudio() {
+  initAudio();
+  if (ctx && !audioPrimed) {
+    audioPrimed = true;
+    try {
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch {}
+  }
+  if (speechPrimed) return;
+  speechPrimed = true;
+  if (!hasVoice()) return;
+  try {
+    // 空串 + volume 0：不发出一丁点声音，只是把语音队列在手势里"点燃"
+    const u = new SpeechSynthesisUtterance('');
+    u.volume = 0;
+    u.lang = 'en-US';
+    window.speechSynthesis.speak(u);
+  } catch {}
+}
+
 function now() {
   return ctx ? ctx.currentTime : 0;
 }
@@ -1975,15 +2043,29 @@ function hasVoice() {
   return typeof window !== 'undefined' && !!window.speechSynthesis;
 }
 
+// 这台设备"有 speechSynthesis 但念不出声"——微信 iOS 的 WKWebView 就是这样。
+// 只能靠"发一条出去看它有没有 onstart"来判定，判断一次就记住。
+let speechBroken = false;
+let active = null;
+
+function speechUnavailable() {
+  return !hasVoice() || speechBroken;
+}
+
 /**
  * 朗读英文单词。针对 6–7 岁放慢语速、略提音高。
+ *
+ * 加了一个看门狗：微信/部分安卓内核会接受 speak() 却既不来 onstart 也不来
+ * onerror，表现就是"点了没反应"。1.2 秒没有动静就判定这台机器念不出来，
+ * 并且**必须**补调 onend，否则等朗读结束的流程会永远卡住。
  */
-function speak(text, { rate = 0.78, pitch = 1.12, onend } = {}) {
+function speak(text, { rate = 0.78, pitch = 1.12, onend, timeout = 1200 } = {}) {
   if (!hasVoice() || muted) {
     onend?.();
     return;
   }
   const synth = window.speechSynthesis;
+  if (active) active.finish();
   try {
     synth.cancel();
   } catch {}
@@ -1993,15 +2075,48 @@ function speak(text, { rate = 0.78, pitch = 1.12, onend } = {}) {
   u.pitch = pitch;
   u.volume = 1;
   if (preferred) u.voice = preferred;
-  if (onend) u.onend = onend;
+
+  let done = false;
+  let timer = null;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    if (timer) clearTimeout(timer);
+    if (active && active.finish === finish) active = null;
+    onend?.();
+  };
+  // 只有在"手势里已经点燃过语音队列"之后，沉默才算证据。
+  // 没点燃过的时候不响是正常的（iOS 就这样），不能据此判定设备不支持。
+  const markBroken = () => {
+    if (speechPrimed) speechBroken = true;
+  };
+  active = { finish };
+  timer = setTimeout(() => {
+    markBroken();
+    finish();
+  }, timeout);
+
+  u.onstart = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+  u.onend = finish;
+  u.onerror = () => {
+    markBroken();
+    finish();
+  };
   try {
     synth.speak(u);
   } catch {
-    onend?.();
+    markBroken();
+    finish();
   }
 }
 
 function stopSpeaking() {
+  // 先 finish 再 cancel：cancel() 会触发 onend/onerror，顺序反了会把
+  // "我们自己打断"误判成"这台机器念不出来"。
+  if (active) active.finish();
   try {
     window.speechSynthesis?.cancel();
   } catch {}
@@ -2224,9 +2339,10 @@ function mount(root) {
   syncHud();
   renderTabs();
 
-  // 悬浮音效按钮以外的全局点击：解锁 WebAudio
+  // 第一次真实触摸：一次性解锁 WebAudio + 语音。
+  // iOS / 微信内置浏览器只认手势调用栈里的这一次，晚一步后面就永远静音。
   const unlock = () => {
-    initAudio();
+    unlockAudio();
     app.removeEventListener('pointerdown', unlock);
   };
   app.addEventListener('pointerdown', unlock);
@@ -2346,7 +2462,7 @@ function goSplash() {
         class: 'btn btn--primary play',
         type: 'button',
         onclick: () => {
-          initAudio();
+          unlockAudio();
           sfx.fanfare();
           goMap();
         },
@@ -2531,11 +2647,21 @@ function openSheet(unitId) {
 
 // ---------------------------------------------------------------- 战斗
 
+/**
+ * 设备念不出声时，听音寻宝没法做（没有听力通道，孩子只能瞎猜）。
+ * 换成看图选词：同样考词形，只是把"听"换成"看"，关卡照样能通关。
+ */
+function speakSafeDef(def) {
+  if (!speechUnavailable()) return def;
+  return { ...def, types: (def.types || []).map((t) => (t === 'listen-pick' ? 'pick-word' : t)) };
+}
+
 function startLevel(unitId, levelIndex) {
   const unit = getUnit(unitId);
   const def = LEVELS[levelIndex];
+  const safeDef = speakSafeDef(def);
   const seed = (Date.now() ^ (Math.random() * 1e9)) >>> 0;
-  const questions = buildLevel(unit, def, mulberry32(seed));
+  const questions = buildLevel(unit, safeDef, mulberry32(seed));
 
   battle = {
     unitId,
@@ -2548,6 +2674,8 @@ function startLevel(unitId, levelIndex) {
     missed: [],
     locked: false,
     seed,
+    // 这一局原本有听音题、但这台设备念不出来 → 已经在开局时换成看图选词
+    downgraded: safeDef !== def,
   };
 
   view.name = 'battle';
@@ -2624,13 +2752,21 @@ function paintQuestion() {
 
   // 提示区
   const kids = [];
+  const canSpeak = !speechUnavailable();
+  const replay = () => {
+    sfx.tap();
+    speak(q.word.en);
+  };
   if (q.type === 'listen-pick') {
-    kids.push(h('button', { class: 'speaker', type: 'button', 'aria-label': '再听一次', html: SPEAKER_SVG }));
+    // 这个喇叭必须能点：孩子第一反应就是点它，只自动播一次是不够的
+    kids.push(
+      h('button', { class: 'speaker', type: 'button', 'aria-label': '再听一次', html: SPEAKER_SVG, onclick: replay }),
+    );
   } else if (q.type === 'pick-word') {
     kids.push(h('div', { class: 'prompt__art' }, artOf(q.word)));
-    kids.push(
-      h('button', { class: 'iconbtn', type: 'button', 'aria-label': '听发音', onclick: () => speak(q.word.en) }, '🔊'),
-    );
+    if (canSpeak) {
+      kids.push(h('button', { class: 'iconbtn', type: 'button', 'aria-label': '听发音', onclick: replay }, '🔊'));
+    }
   } else {
     kids.push(
       h(
@@ -2642,9 +2778,9 @@ function paintQuestion() {
       ),
     );
     kids.push(h('div', { class: 'prompt__art' }, artOf(q.word)));
-    kids.push(
-      h('button', { class: 'iconbtn', type: 'button', 'aria-label': '听发音', onclick: () => speak(q.word.en) }, '🔊'),
-    );
+    if (canSpeak) {
+      kids.push(h('button', { class: 'iconbtn', type: 'button', 'aria-label': '听发音', onclick: replay }, '🔊'));
+    }
   }
   refs.prompt.replaceChildren(...kids);
 
@@ -2672,6 +2808,11 @@ function paintQuestion() {
     setTimeout(() => {
       if (battle && battle.questions[battle.i] === q) speak(q.word.en);
     }, 300);
+  }
+
+  if (battle.downgraded && !battle.toasted) {
+    battle.toasted = true;
+    toast('这台设备不能朗读，已自动把听音题换成看图选词');
   }
 }
 
@@ -2723,6 +2864,17 @@ function advance() {
     finishLevel();
     return;
   }
+  // 开局时还"能念"，玩到一半才判定念不出来的情况：把剩下的听音题就地换掉，
+  // 否则孩子会连着遇到几道"没有声音、只能瞎猜"的题。
+  const q = battle.questions[battle.i];
+  if (q.type === 'listen-pick' && speechUnavailable()) {
+    const unit = getUnit(battle.unitId);
+    battle.questions[battle.i] = {
+      ...buildQuestion('pick-word', q.word, unit.words, mulberry32(battle.seed + battle.i)),
+      id: q.id,
+    };
+    battle.downgraded = true;
+  }
   battle.locked = false;
   paintQuestion();
 }
@@ -2764,6 +2916,15 @@ function floatText(text, clientX, clientY) {
   const ft = h('div', { class: 'float-coin', style: { left: `${x}px`, top: `${y}px` } }, text);
   fxEl.append(ft);
   setTimeout(() => ft.remove(), 1100);
+}
+
+/** 给家长看的一句说明（孩子还不识字，这条不是给孩子看的）。 */
+function toast(text) {
+  if (!fxEl) return;
+  const t = h('div', { class: 'toast' }, text);
+  fxEl.append(t);
+  setTimeout(() => t.classList.add('toast--out'), 3400);
+  setTimeout(() => t.remove(), 4000);
 }
 
 // ---------------------------------------------------------------- 结算
