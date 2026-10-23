@@ -1,6 +1,8 @@
-﻿# 单词星球 Word Planet
+# 单词星球 Word Planet
 
 给 6–7 岁中国孩子做的英语启蒙小游戏：**答对一个单词，星球就亮起来一点。**
+
+![预览图](preview.png)
 
 打开 https://qiang-qiang-know.github.io/word-planet/ 直接玩（手机竖屏最佳，桌面浏览器也可以）。
 
